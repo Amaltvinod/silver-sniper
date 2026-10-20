@@ -1,0 +1,8 @@
+target/
+.env
+data/recipes.json
+data/guilds.json
+data/access.json
+*.iml
+.idea/
+data/users.json
