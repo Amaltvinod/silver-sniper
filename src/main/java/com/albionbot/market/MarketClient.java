@@ -26,13 +26,20 @@ import java.util.zip.GZIPInputStream;
 
 /**
  * Client for the Albion Online Data Project price endpoint ({@code /api/v2/stats/prices}).
- * Requests are chunked to stay under URL length limits, throttled to respect the public rate limit
- * (180/min), retried on 429/5xx, and cached for {@code cacheTtl}. Responses are requested gzipped:
- * the API throttles uncompressed requests with 429.
+ * Requests are chunked to stay under URL length limits, throttled to respect the public rate limits
+ * (180/min and 300/5min, shared by every client in this process), retried on 429/5xx, and cached for
+ * {@code cacheTtl}. Responses are requested gzipped: the API throttles uncompressed requests with 429.
+ * Lookups run one at a time per client, so a command that overlaps one in flight reads its results from the cache.
  */
 public final class MarketClient {
     private static final int MAX_IDS_CHARS = 3000;
-    private static final long MIN_GAP_MS = 400;
+    /** 300 per 5 minutes is one per second; the margin covers clock jitter and retries. */
+    private static final long MIN_GAP_MS = 1100;
+    /** Identifies the bot to the API's operators instead of the generic Java client string. */
+    public static final String USER_AGENT = "SilverSniper/1.0 (Albion Online Discord bot)";
+    /** Throttle state is static: all servers' clients share one IP and so, conservatively, one budget. */
+    private static final Object THROTTLE = new Object();
+    private static long lastRequestAt = 0;
 
     private record Key(String itemId, String city, int quality) {}
 
@@ -53,7 +60,6 @@ public final class MarketClient {
     private final Duration maxAge;
     private final Duration cacheTtl;
     private final Clock clock;
-    private long lastRequestAt = 0;
 
     public MarketClient(String baseUrl, Duration maxAge, Duration cacheTtl, Clock clock) {
         this.baseUrl = baseUrl;
@@ -68,8 +74,8 @@ public final class MarketClient {
     }
 
     /** As above, but rows older than {@code maxAge} (instead of the client default) read as absent. */
-    public PriceBook fetch(Collection<String> itemIds, Collection<String> locations, Collection<Integer> qualities,
-                           Duration maxAge) throws IOException, InterruptedException {
+    public synchronized PriceBook fetch(Collection<String> itemIds, Collection<String> locations, Collection<Integer> qualities,
+                                        Duration maxAge) throws IOException, InterruptedException {
         Instant now = clock.instant();
         List<String> stale = new ArrayList<>();
         for (String id : new TreeSet<>(itemIds)) {
@@ -147,7 +153,7 @@ public final class MarketClient {
             throttle();
             HttpResponse<InputStream> res = http.send(
                     HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(30))
-                            .header("Accept-Encoding", "gzip").GET().build(),
+                            .header("Accept-Encoding", "gzip").header("User-Agent", USER_AGENT).GET().build(),
                     HttpResponse.BodyHandlers.ofInputStream());
             int code = res.statusCode();
             if (code == 200) {
@@ -169,7 +175,7 @@ public final class MarketClient {
      * Daily sales of each item at {@code location} (usually the Black Market) over {@link Demand#WINDOW}.
      * Items with no recorded sales are absent from the result.
      */
-    public Map<String, Demand> demand(Collection<String> itemIds, String location, int quality)
+    public synchronized Map<String, Demand> demand(Collection<String> itemIds, String location, int quality)
             throws IOException, InterruptedException {
         Instant now = clock.instant();
         List<String> stale = new ArrayList<>();
@@ -214,10 +220,12 @@ public final class MarketClient {
         return gzip ? new GZIPInputStream(res.body()) : res.body();
     }
 
-    private synchronized void throttle() throws InterruptedException {
-        long wait = lastRequestAt + MIN_GAP_MS - System.currentTimeMillis();
-        if (wait > 0) Thread.sleep(wait);
-        lastRequestAt = System.currentTimeMillis();
+    private static void throttle() throws InterruptedException {
+        synchronized (THROTTLE) {
+            long wait = lastRequestAt + MIN_GAP_MS - System.currentTimeMillis();
+            if (wait > 0) Thread.sleep(wait);
+            lastRequestAt = System.currentTimeMillis();
+        }
     }
 
     static Price parse(JsonNode row) {

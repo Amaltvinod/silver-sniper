@@ -1,5 +1,6 @@
 package com.albionbot.access;
 
+import com.albionbot.market.MarketClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -87,7 +88,7 @@ public final class GameInfoClient {
             try {
                 HttpResponse<InputStream> res = http.send(
                         HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(30))
-                                .header("Accept-Encoding", "gzip").GET().build(),
+                                .header("Accept-Encoding", "gzip").header("User-Agent", MarketClient.USER_AGENT).GET().build(),
                         HttpResponse.BodyHandlers.ofInputStream());
                 int code = res.statusCode();
                 if (code == 200) {
